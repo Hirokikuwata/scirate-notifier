@@ -1,0 +1,36 @@
+name: Test Run (1 min after push)
+
+# Temporary test workflow: runs about 1 minute after a push to main so you can
+# verify notifications end-to-end without waiting for the daily schedule.
+# Safe to delete once you've confirmed it works.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test-notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Wait ~1 minute before running
+        run: sleep 60
+
+      - name: Run scirate-notifier
+        env:
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          SCIRATE_CATEGORIES: ${{ vars.SCIRATE_CATEGORIES || 'quant-ph' }}
+          TOP_N: ${{ vars.TOP_N || '5' }}
+          MIN_SCITES: ${{ vars.MIN_SCITES || '1' }}
+        run: python -m scirate_notifier
