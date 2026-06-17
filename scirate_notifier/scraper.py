@@ -10,28 +10,34 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup, Tag
 
+from scirate_notifier.http_client import fetch_html
+
 logger = logging.getLogger(__name__)
 
 SCIRATE_BASE = "https://scirate.com"
-DEFAULT_USER_AGENT = (
-    "scirate-notifier/0.1.0 (+https://github.com/scirate-notifier; "
-    "arxiv paper digest bot)"
-)
-REQUEST_TIMEOUT = 15
+REQUEST_TIMEOUT = 20
 
 # Paper container selectors (tried in order; SciRate markup may vary):
-#   div.paper  — primary layout on scirate.com/arxiv/*
-#   li.paper   — alternate list-item layout
-PAPER_CONTAINER_SELECTORS = ("div.paper", "li.paper")
+#   ul.papers .row  — current layout on scirate.com/arxiv/* (2024+)
+#   li.paper        — same rows as list items
+#   div.paper       — legacy layout
+PAPER_CONTAINER_SELECTORS = ("ul.papers .row", "li.paper", "div.paper")
 
 # Title link: .title a — href contains /arxiv/{id}
 TITLE_LINK_SELECTOR = ".title a"
 
-# Scite count: class contains "scite" (e.g. .scites_count, .num-scites, a.scite-button)
-SCITE_SELECTORS = (".scites_count", ".num-scites", "a.scite-button", "[class*='scite']")
+# Scite count: button.count inside .scites-count (current layout)
+SCITE_SELECTORS = (
+    ".scites-count button.count",
+    "button.btn-default.count",
+    ".scites_count",
+    ".num-scites",
+    "a.scite-button",
+    "[class*='scite']",
+)
 
-# Authors: .authors — comma-separated text
-AUTHORS_SELECTOR = ".authors"
+# Authors: .authors a — one link per author
+AUTHORS_SELECTOR = ".authors a"
 
 _ARXIV_ID_RE = re.compile(r"(\d{4}\.\d{4,5}(?:v\d+)?)")
 
@@ -54,13 +60,9 @@ def fetch_top_papers(
 ) -> list[Paper]:
     """Fetch top papers for a SciRate arXiv category over the given day range."""
     url = f"{SCIRATE_BASE}/arxiv/{category}?range={range_days}"
-    http = session or requests.Session()
-    headers = {"User-Agent": DEFAULT_USER_AGENT}
+    html = fetch_html(url, session=session)
 
-    response = http.get(url, headers=headers, timeout=REQUEST_TIMEOUT)
-    response.raise_for_status()
-
-    soup = BeautifulSoup(response.text, "lxml")
+    soup = BeautifulSoup(html, "lxml")
     containers = _find_paper_containers(soup)
 
     papers: list[Paper] = []
@@ -152,13 +154,20 @@ def _extract_scites(container: Tag) -> int:
 
 
 def _extract_authors(container: Tag) -> list[str]:
-    authors_el = container.select_one(AUTHORS_SELECTOR)
+    author_links = container.select(AUTHORS_SELECTOR)
+    if author_links:
+        return [_clean_author_name(link.get_text(strip=True)) for link in author_links]
+    authors_el = container.select_one(".authors")
     if authors_el is None:
         return []
     text = authors_el.get_text(strip=True)
     if not text:
         return []
-    return [name.strip() for name in text.split(",") if name.strip()]
+    return [_clean_author_name(name) for name in text.split(",") if name.strip()]
+
+
+def _clean_author_name(name: str) -> str:
+    return name.strip().rstrip(",")
 
 
 def _first_integer(text: str) -> int | None:

@@ -56,10 +56,12 @@ SciRate markup can change without notice. If scraping returns no papers or wrong
 
 | Purpose | Selectors tried (in order) |
 |---------|---------------------------|
-| Paper container | `div.paper`, `li.paper` |
+| Paper container | `ul.papers .row`, `li.paper`, `div.paper` |
 | Title link | `.title a` |
-| Scite count | `.scites_count`, `.num-scites`, `a.scite-button`, `[class*='scite']` |
-| Authors | `.authors` |
+| Scite count | `.scites-count button.count`, `button.btn-default.count` |
+| Authors | `.authors a` |
+
+GitHub Actions runners may be blocked by SciRate (HTTP 403). This project uses `curl_cffi` with Chrome TLS impersonation to reduce that risk. If scraping still fails, run locally or switch to a self-hosted runner.
 
 ## Configuration
 
