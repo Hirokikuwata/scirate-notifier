@@ -2,13 +2,18 @@
 
 Daily digest of top [SciRate](https://scirate.com) papers for arXiv categories (default: **quant-ph**), delivered as a push notification to your phone via [ntfy.sh](https://ntfy.sh).
 
-Runs locally or on a scheduled [GitHub Actions](https://github.com/features/actions) workflow.
+Runs locally (cron/launchd) or on a scheduled [GitHub Actions](https://github.com/features/actions) workflow.
 
 ## What it does
 
-1. Scrapes SciRate for the highest-scited papers in the configured category/categories over the last day.
-2. Filters by minimum scite count and keeps the top N papers.
-3. Sends a concise notification with titles, scite counts, and arXiv links.
+The tool has two complementary modes, both sending push notifications:
+
+| Mode | Source | Sorted by |
+|------|--------|-----------|
+| `--source scirate` | SciRate top papers | Scite count (community upvotes) |
+| `--source arxiv` | arXiv latest submissions | Submission date (newest first) |
+
+Running both every morning gives you **what's popular** + **what's brand new**. If SciRate is unavailable (e.g. IP-blocked on cloud runners), the `auto` mode falls back to arXiv automatically.
 
 ## How notifications work
 
@@ -38,10 +43,59 @@ python -m scirate_notifier
 Optional CLI overrides:
 
 ```bash
+# SciRate top papers only
+python -m scirate_notifier --source scirate --dry-run
+
+# arXiv recent papers only
+python -m scirate_notifier --source arxiv --dry-run
+
+# Multiple categories
 python -m scirate_notifier --dry-run --top-n 10 --category quant-ph --category gr-qc
 ```
 
 Copy `.env.example` to `.env` for reference; export variables manually or use a tool like `direnv`.
+
+## Local cron setup (macOS)
+
+Running locally avoids cloud IP restrictions — SciRate works fine from a home/office IP.
+
+**Step 1 — create `.env`**
+
+```bash
+cp .env.example .env
+# Edit .env and set NTFY_TOPIC=your-secret-topic
+```
+
+**Step 2 — test the script**
+
+```bash
+./run_local.sh --source scirate --dry-run
+./run_local.sh --source arxiv   --dry-run
+```
+
+`run_local.sh` automatically creates `.venv` and installs dependencies on first run.
+
+**Step 3 — add crontab entries**
+
+```bash
+crontab -e
+```
+
+Paste (adjust the path if your repo is elsewhere):
+
+```cron
+# scirate-notifier — runs at 08:00 local time
+# Assumes macOS system timezone is set to JST.
+# SciRate top papers (scite-sorted)
+0 8 * * * /Users/kuwatahiroki/Projects/scirate-notifier/run_local.sh --source scirate >> /tmp/scirate-notifier.log 2>&1
+# arXiv latest submissions
+0 8 * * * /Users/kuwatahiroki/Projects/scirate-notifier/run_local.sh --source arxiv   >> /tmp/scirate-notifier.log 2>&1
+```
+
+> **Tip:** To verify your Mac's timezone: `sudo systemsetup -gettimezone`  
+> To check the log after 8:00: `cat /tmp/scirate-notifier.log`
+
+**macOS sleep caveat:** If your Mac is asleep at 08:00, macOS skips that cron run. Use *System Settings → Battery → Wake for network access* or schedule slightly later when the machine is reliably awake. Alternatively, use `launchd` with `StartCalendarInterval` (more reliable than cron on macOS).
 
 ## GitHub Actions setup
 
@@ -61,7 +115,7 @@ SciRate markup can change without notice. If scraping returns no papers or wrong
 | Scite count | `.scites-count button.count`, `button.btn-default.count` |
 | Authors | `.authors a` |
 
-GitHub Actions runners may be blocked by SciRate (HTTP 403). This project uses `curl_cffi` with Chrome TLS impersonation to reduce that risk. If scraping still fails, run locally or switch to a self-hosted runner.
+GitHub Actions runners may be blocked by SciRate (HTTP 403). When that happens the notifier automatically falls back to arXiv recent papers and the notification title will read "arXiv … recent papers (SciRate unavailable)". For reliable SciRate access, use the local cron setup above.
 
 ## Configuration
 

@@ -7,14 +7,20 @@ import logging
 import sys
 from dataclasses import replace
 
-import requests
-
 from scirate_notifier.arxiv_client import fetch_recent_all
 from scirate_notifier.config import Config, ConfigError
 from scirate_notifier.notifier import send_notification
 from scirate_notifier.scraper import Paper, fetch_all
 
 logger = logging.getLogger(__name__)
+
+# Source labels returned by _fetch_papers:
+#   "scirate"        – fetched from SciRate (has scite counts)
+#   "arxiv"          – explicitly requested arXiv run
+#   "arxiv-fallback" – SciRate failed, fell back to arXiv
+SOURCE_SCIRATE = "scirate"
+SOURCE_ARXIV = "arxiv"
+SOURCE_ARXIV_FALLBACK = "arxiv-fallback"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -35,30 +41,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.top_n is not None:
         config = replace(config, top_n=args.top_n)
 
-    papers, using_fallback = _fetch_papers(config)
+    papers, source = _fetch_papers(config, args.source)
     if papers is None:
         return 1
 
-    if using_fallback:
-        # arXiv fallback papers all have scites=0; skip the scites filter.
-        top_papers = papers[: config.top_n]
-    else:
+    if source == SOURCE_SCIRATE:
         filtered = [p for p in papers if p.scites >= config.min_scites]
         top_papers = filtered[: config.top_n]
+    else:
+        # arXiv papers have scites=0; skip the scites filter.
+        top_papers = papers[: config.top_n]
 
     logger.info(
         "Fetched %d paper(s), showing top %d (source=%s)",
         len(papers),
         len(top_papers),
-        "arxiv-fallback" if using_fallback else "scirate",
+        source,
     )
 
     if args.dry_run:
-        _print_dry_run(top_papers, config, using_fallback)
+        _print_dry_run(top_papers, config, source)
         return 0
 
     try:
-        send_notification(config, top_papers, using_fallback=using_fallback)
+        send_notification(config, top_papers, source=source)
     except Exception as exc:
         logger.error("Failed to send notification: %s", exc)
         return 1
@@ -66,34 +72,49 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def _fetch_papers(config: Config) -> tuple[list[Paper] | None, bool]:
-    """Return (papers, using_fallback). papers=None signals a fatal error."""
+def _fetch_papers(config: Config, source_arg: str) -> tuple[list[Paper] | None, str]:
+    """Fetch papers from the requested source.
+
+    Returns (papers, actual_source). papers=None signals a fatal error.
+    """
+    if source_arg == SOURCE_ARXIV:
+        try:
+            papers = fetch_recent_all(
+                config.scirate_categories, max_results=config.top_n * 2
+            )
+            return papers, SOURCE_ARXIV
+        except Exception as exc:
+            logger.error("arXiv fetch failed: %s", exc)
+            return None, SOURCE_ARXIV
+
+    if source_arg == SOURCE_SCIRATE:
+        try:
+            papers = fetch_all(config.scirate_categories, config.scirate_range_days)
+            return papers, SOURCE_SCIRATE
+        except Exception as exc:
+            logger.error("SciRate fetch failed: %s", exc)
+            return None, SOURCE_SCIRATE
+
+    # auto: try SciRate first, fall back to arXiv.
     try:
         papers = fetch_all(config.scirate_categories, config.scirate_range_days)
-        return papers, False
-    except requests.HTTPError as exc:
-        status = exc.response.status_code if exc.response is not None else None
-        if status == 403:
-            logger.warning(
-                "SciRate returned 403 (IP blocked). Falling back to arXiv API "
-                "(recent papers, no scite counts)."
-            )
-        else:
-            logger.warning("SciRate fetch failed (%s). Falling back to arXiv API.", exc)
+        return papers, SOURCE_SCIRATE
     except Exception as exc:
-        logger.warning("SciRate fetch failed: %s. Falling back to arXiv API.", exc)
+        logger.warning("SciRate fetch failed (%s). Falling back to arXiv API.", exc)
 
     try:
-        papers = fetch_recent_all(config.scirate_categories, max_results=config.top_n * 2)
-        return papers, True
+        papers = fetch_recent_all(
+            config.scirate_categories, max_results=config.top_n * 2
+        )
+        return papers, SOURCE_ARXIV_FALLBACK
     except Exception as exc:
         logger.error("arXiv fallback also failed: %s", exc)
-        return None, False
+        return None, "auto"
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Fetch top SciRate papers and notify via ntfy.sh",
+        description="Fetch top SciRate/arXiv papers and notify via ntfy.sh",
     )
     parser.add_argument(
         "--dry-run",
@@ -111,20 +132,34 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="append",
         dest="category",
         metavar="CAT",
-        help="Override SCIRATE_CATEGORIES (repeatable, e.g. quant-ph)",
+        help="Override SCIRATE_CATEGORIES (repeatable, e.g. quant-ph hep-th)",
+    )
+    parser.add_argument(
+        "--source",
+        choices=["auto", SOURCE_SCIRATE, SOURCE_ARXIV],
+        default="auto",
+        help=(
+            "Paper source: auto (try SciRate, fall back to arXiv), "
+            "scirate (SciRate scite-sorted only), "
+            "arxiv (arXiv recent submissions only)"
+        ),
     )
     return parser.parse_args(argv)
 
 
-def _print_dry_run(papers: list[Paper], config: Config, using_fallback: bool = False) -> None:
-    source = "arXiv (fallback)" if using_fallback else "SciRate"
+def _print_dry_run(papers: list[Paper], config: Config, source: str) -> None:
     print(f"[dry-run] source={source} categories={config.scirate_categories} top_n={config.top_n}")
     if not papers:
         print("No papers above threshold.")
         return
     for paper in papers:
-        label = "recent" if using_fallback else f"{paper.scites} scites"
+        if source == SOURCE_SCIRATE:
+            label = f"{paper.scites} scites"
+        else:
+            label = "recent"
         print(f"• {label} — {paper.title}")
+        if paper.authors:
+            print(f"  {', '.join(paper.authors[:3])}")
         print(f"  {paper.abstract_url}")
 
 
