@@ -7,6 +7,9 @@ import logging
 import sys
 from dataclasses import replace
 
+import requests
+
+from scirate_notifier.arxiv_client import fetch_recent_all
 from scirate_notifier.config import Config, ConfigError
 from scirate_notifier.notifier import send_notification
 from scirate_notifier.scraper import Paper, fetch_all
@@ -32,34 +35,60 @@ def main(argv: list[str] | None = None) -> int:
     if args.top_n is not None:
         config = replace(config, top_n=args.top_n)
 
-    try:
-        papers = fetch_all(config.scirate_categories, config.scirate_range_days)
-    except Exception as exc:
-        logger.error("Failed to fetch papers: %s", exc)
+    papers, using_fallback = _fetch_papers(config)
+    if papers is None:
         return 1
 
-    filtered = [p for p in papers if p.scites >= config.min_scites]
-    top_papers = filtered[: config.top_n]
+    if using_fallback:
+        # arXiv fallback papers all have scites=0; skip the scites filter.
+        top_papers = papers[: config.top_n]
+    else:
+        filtered = [p for p in papers if p.scites >= config.min_scites]
+        top_papers = filtered[: config.top_n]
 
     logger.info(
-        "Fetched %d paper(s), %d above min scites (%d), showing top %d",
+        "Fetched %d paper(s), showing top %d (source=%s)",
         len(papers),
-        len(filtered),
-        config.min_scites,
         len(top_papers),
+        "arxiv-fallback" if using_fallback else "scirate",
     )
 
     if args.dry_run:
-        _print_dry_run(top_papers, config)
+        _print_dry_run(top_papers, config, using_fallback)
         return 0
 
     try:
-        send_notification(config, top_papers)
+        send_notification(config, top_papers, using_fallback=using_fallback)
     except Exception as exc:
         logger.error("Failed to send notification: %s", exc)
         return 1
 
     return 0
+
+
+def _fetch_papers(config: Config) -> tuple[list[Paper] | None, bool]:
+    """Return (papers, using_fallback). papers=None signals a fatal error."""
+    try:
+        papers = fetch_all(config.scirate_categories, config.scirate_range_days)
+        return papers, False
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        if status == 403:
+            logger.warning(
+                "SciRate returned 403 (IP blocked). Falling back to arXiv API "
+                "(recent papers, no scite counts)."
+            )
+        else:
+            logger.warning("SciRate fetch failed (%s). Falling back to arXiv API.", exc)
+    except Exception as exc:
+        logger.warning("SciRate fetch failed: %s. Falling back to arXiv API.", exc)
+
+    try:
+        papers = fetch_recent_all(config.scirate_categories, max_results=config.top_n * 2)
+        return papers, True
+    except Exception as exc:
+        logger.error("arXiv fallback also failed: %s", exc)
+        return None, False
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -87,13 +116,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _print_dry_run(papers: list[Paper], config: Config) -> None:
-    print(f"[dry-run] categories={config.scirate_categories} top_n={config.top_n}")
+def _print_dry_run(papers: list[Paper], config: Config, using_fallback: bool = False) -> None:
+    source = "arXiv (fallback)" if using_fallback else "SciRate"
+    print(f"[dry-run] source={source} categories={config.scirate_categories} top_n={config.top_n}")
     if not papers:
         print("No papers above threshold.")
         return
     for paper in papers:
-        print(f"• {paper.scites} scites — {paper.title}")
+        label = "recent" if using_fallback else f"{paper.scites} scites"
+        print(f"• {label} — {paper.title}")
         print(f"  {paper.abstract_url}")
 
 

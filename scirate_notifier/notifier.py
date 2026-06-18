@@ -16,26 +16,38 @@ REQUEST_TIMEOUT = 15
 TITLE_MAX_LEN = 120
 
 
-def send_notification(config: Config, papers: list[Paper]) -> None:
+def send_notification(
+    config: Config,
+    papers: list[Paper],
+    *,
+    using_fallback: bool = False,
+) -> None:
     """POST a digest to the configured ntfy topic."""
+    categories = sorted({p.category for p in papers}) if papers else config.scirate_categories
+    category_label = ", ".join(categories)
+
     if not papers:
         _post(
             config,
-            title="SciRate: no top papers today",
+            title=f"SciRate {category_label}: no top papers today",
             body="No papers above threshold today.",
             click_url=f"{config.ntfy_server}/{config.ntfy_topic}",
             priority="low",
         )
         return
 
-    categories = sorted({p.category for p in papers})
-    category_label = ", ".join(categories)
-    title = f"SciRate {category_label} top papers"
+    if using_fallback:
+        title = f"arXiv {category_label} recent papers (SciRate unavailable)"
+    else:
+        title = f"SciRate {category_label} top papers"
 
     lines: list[str] = []
     for paper in papers:
         short_title = shorten(paper.title, width=TITLE_MAX_LEN, placeholder="...")
-        lines.append(f"• {paper.scites}⭐ {short_title}")
+        if using_fallback:
+            lines.append(f"• {short_title}")
+        else:
+            lines.append(f"• {paper.scites}⭐ {short_title}")
         lines.append(f"  {paper.abstract_url}")
 
     body = "\n".join(lines)
@@ -48,7 +60,7 @@ def send_notification(config: Config, papers: list[Paper]) -> None:
         click_url=click_url,
         priority=config.ntfy_priority,
     )
-    logger.info("Sent notification with %d paper(s)", len(papers))
+    logger.info("Sent notification with %d paper(s) (fallback=%s)", len(papers), using_fallback)
 
 
 def _post(
