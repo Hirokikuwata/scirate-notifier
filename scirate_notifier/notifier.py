@@ -48,6 +48,8 @@ def send_notification(
             lines.append(f"• {short_title}")
         else:
             lines.append(f"• {paper.scites}⭐ {short_title}")
+        if paper.authors:
+            lines.append(f"  {_format_authors(paper.authors)}")
         lines.append(f"  {paper.abstract_url}")
 
     body = "\n".join(lines)
@@ -86,6 +88,13 @@ def _post(
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
+
+
+def _format_authors(authors: list[str], max_shown: int = 3) -> str:
+    shown = authors[:max_shown]
+    rest = len(authors) - len(shown)
+    label = ", ".join(shown)
+    return f"{label} +{rest} more" if rest > 0 else label
 
 
 def _ascii_safe(value: str) -> str:
